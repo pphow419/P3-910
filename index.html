@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="zh-Hans">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>六年级认读游戏 - 2025P3-9&10</title>
+<style>
+  body{font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial; max-width: 800px; margin: 0 auto; padding: 20px;}
+  h1{margin-bottom: .3rem;}
+  .muted{color:#666;font-size:.9rem;margin-bottom:1rem;}
+  button{padding:8px 14px;margin:4px;cursor:pointer;border-radius:6px;border:1px solid #ccc;background:#f7f7f7;}
+  button.primary{background:#007bff;color:#fff;border-color:#007bff;}
+  button.danger{background:#dc3545;color:#fff;border-color:#dc3545;}
+  #questionBox{font-size:1.8rem;margin:16px 0;min-height:2.5rem;}
+  #statusMsg{min-height:1.2rem;margin:6px 0;color:#0a7;}
+  #wrongBox{margin:6px 0;color:#d33;}
+  #timerScore{margin:10px 0;font-weight:bold;}
+  table{width:100%;border-collapse:collapse;margin-top:16px;}
+  th,td{border:1px solid #ddd;padding:6px;text-align:center;}
+  th{background:#fafafa;}
+  #leaderboardTitle{margin-top:28px;}
+  .hidden{display:none;}
+  .tag{display:inline-block;border:1px solid #666;border-radius:4px;padding:0 6px;margin-left:4px;font-size:12px;color:#666;}
+</style>
+</head>
+<body>
+  <h1>六年级认读游戏 <span class="tag">gameId = "2025P3-9&10"</span></h1>
+  <p class="muted">请把显示的字读出来</p>
+
+  <div>
+    <button id="testMicBtn">测试麦克风</button>
+    <span id="testMicResult" class="muted"></span>
+  </div>
+
+  <div id="timerScore">
+    剩余时间：<span id="timeLeft">90</span> 秒　
+    当前得分：<span id="score">0</span> / 100　
+    题号：<span id="questionNumber">0</span> / 10
+  </div>
+
+  <div id="questionBox"></div>
+
+  <div>
+    <button id="nextBtn" class="primary">下一题</button>
+    <button id="restartBtn" class="danger">重新开始</button>
+  </div>
+
+  <div id="statusMsg"></div>
+  <div id="wrongBox"></div>
+
+  <audio id="ttsAudio" class="hidden"></audio>
+
+  <h2 id="leaderboardTitle">得分榜（前 10 名） <span class="tag">2025P3-9&10</span></h2>
+  <table id="leaderboardTable">
+    <thead>
+      <tr>
+        <th>名次</th>
+        <th>名字</th>
+        <th>分数</th>
+        <th>所剩时间(秒)</th>
+        <th>完成时间</th>
+        <th>gameId</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+<script>
+(() => {
+  const gameId = "2025P3-9&10";
+  const STORAGE_KEY = `readingGameLeaderboard_${gameId}`;
+
+ const WORDS = [
+  "回答问题","满头大汗","不停地倒水","伸进河里吸水",
+  "救人的办法","儿童节","保护环境","转身离开",
+  "又脏又臭","清洗厕所","非常吃惊","仔细一看"
+];
+
+  const TOTAL_QUESTIONS = 10;
+  const PER_QUESTION_SCORE = 10;
+  const TOTAL_TIME = 90;
+
+  // UI refs
+  const testMicBtn = document.getElementById('testMicBtn');
+  const testMicResult = document.getElementById('testMicResult');
+  const nextBtn = document.getElementById('nextBtn');
+  const restartBtn = document.getElementById('restartBtn');
+  const timeLeftEl = document.getElementById('timeLeft');
+  const scoreEl = document.getElementById('score');
+  const qNumEl = document.getElementById('questionNumber');
+  const questionBox = document.getElementById('questionBox');
+  const statusMsg = document.getElementById('statusMsg');
+  const wrongBox = document.getElementById('wrongBox');
+  const leaderboardTableBody = document.querySelector('#leaderboardTable tbody');
+
+  // State
+  let recognition = null;
+  let recognizing = false;
+  let hasAskedPermission = false;
+
+  let shuffledQuestions = [];
+  let currentIndex = -1;
+  let score = 0;
+  let timeLeft = TOTAL_TIME;
+  let timerId = null;
+  let gameStarted = false;
+  let finished = false;
+
+  // --- Speech Recognition setup ---
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const canRecognize = !!SpeechRecognition;
+
+  if(!canRecognize){
+    testMicResult.textContent = "⚠️ 此浏览器不支持 Web Speech API 语音识别，请使用最新版 Chrome/Edge。";
+    testMicBtn.disabled = true;
+  } else {
+    recognition = new SpeechRecognition();
+    recognition.lang = 'zh-CN';
+    recognition.continuous = false;
+    recognition.interimResults = false;
+
+    recognition.onstart = () => { recognizing = true; };
+    recognition.onend = () => { recognizing = false; };
+
+    recognition.onerror = (e) => {
+      console.error('Recognition error:', e);
+      statusMsg.textContent = "语音识别出错，请重试。";
+      recognizing = false;
+    };
+  }
+
+  testMicBtn.addEventListener('click', async () => {
+    if(!canRecognize) return;
+    testMicResult.textContent = "正在测试麦克风，请读任意一句话...";
+    try {
+      const text = await recognizeOnce();
+      testMicResult.textContent = `识别结果：${text || '(空)'}。麦克风可以使用。`;
+      hasAskedPermission = true;
+    } catch (e) {
+      testMicResult.textContent = "测试失败，请确认已允许麦克风权限。";
+    }
+  });
+
+  nextBtn.addEventListener('click', async () => {
+    if (finished) return; // 游戏结束后不再响应
+    if (!gameStarted) {
+      startGame();
+    } else {
+      // 防止重复下一题：只有题目回答完成（显示结果）后才能进入下一题
+      // 这里我们允许直接下一题（即使没答），但一般推荐答完再按
+    }
+    await showNextQuestionAndCapture();
+  });
+
+  restartBtn.addEventListener('click', () => {
+    resetGame();
+  });
+
+  function startGame(){
+    gameStarted = true;
+    currentIndex = -1;
+    score = 0;
+    timeLeft = TOTAL_TIME;
+    finished = false;
+    scoreEl.textContent = score;
+    timeLeftEl.textContent = timeLeft;
+    qNumEl.textContent = "0";
+    statusMsg.textContent = "";
+    wrongBox.innerHTML = "";
+    shuffledQuestions = shuffle([...WORDS]).slice(0, TOTAL_QUESTIONS);
+    questionBox.textContent = "";
+    if (timerId) clearInterval(timerId);
+    timerId = setInterval(() => {
+      timeLeft--;
+      timeLeftEl.textContent = timeLeft;
+      if(timeLeft <= 0){
+        timeLeft = 0;
+        timeLeftEl.textContent = 0;
+        clearInterval(timerId);
+        finishGame();
+      }
+    }, 1000);
+  }
+
+  async function showNextQuestionAndCapture(){
+    if (finished) return;
+
+    currentIndex++;
+    if(currentIndex >= TOTAL_QUESTIONS){
+      finishGame();
+      return;
+    }
+
+    const question = shuffledQuestions[currentIndex];
+    qNumEl.textContent = (currentIndex + 1).toString();
+    questionBox.textContent = question;
+    statusMsg.textContent = "请开始读题...（系统正在录音识别）";
+    wrongBox.innerHTML = "";
+
+    if(!canRecognize){
+      statusMsg.textContent = "此浏览器不支持识别，系统将跳过评分。";
+      return;
+    }
+
+    try {
+      // 第一次识别时确保权限已获取
+      if (!hasAskedPermission) {
+        await recognizeOnceSilently(); // 做一次空识别让浏览器弹权限
+        hasAskedPermission = true;
+      }
+      const result = await recognizeOnce();
+      evaluate(question, result);
+    } catch (e) {
+      console.error(e);
+      statusMsg.textContent = "识别失败，请按『下一题』继续。";
+      showWrong(question);
+    }
+  }
+
+  function evaluate(correctText, recognizedText){
+    const normalizedCorrect = normalizeText(correctText);
+    const normalizedRecognized = normalizeText(recognizedText || "");
+    if (normalizedCorrect === normalizedRecognized){
+      score += PER_QUESTION_SCORE;
+      scoreEl.textContent = score;
+      statusMsg.textContent = "恭喜你！读对了！";
+    } else {
+      statusMsg.textContent = "加油！";
+      showWrong(correctText);
+    }
+
+    if (currentIndex === TOTAL_QUESTIONS - 1){
+      // 最后一题答完，直接结束
+      finishGame();
+    }
+  }
+
+  function showWrong(correctText){
+    wrongBox.innerHTML = `
+      <button id="speakBtn">正确读音</button>
+    `;
+    document.getElementById('speakBtn').onclick = () => speakText(correctText);
+  }
+
+  function speakText(text){
+    // 使用 SpeechSynthesis 朗读
+    const utt = new SpeechSynthesisUtterance(text);
+    utt.lang = 'zh-CN';
+    speechSynthesis.speak(utt);
+  }
+
+  function finishGame(){
+    if (finished) return;
+    finished = true;
+    clearInterval(timerId);
+    timerId = null;
+
+    // 弹窗提示
+    alert(`得分：${score} / 100\n所剩时间：${timeLeft} 秒`);
+
+    const playerName = prompt("请输入你的名字，以便记录在排行榜：", "");
+    if (playerName && playerName.trim()){
+      saveScore(playerName.trim(), score, timeLeft);
+    }
+    renderLeaderboard();
+  }
+
+  function resetGame(){
+    clearInterval(timerId);
+    recognition && recognition.abort?.();
+    gameStarted = false;
+    finished = false;
+    score = 0;
+    timeLeft = TOTAL_TIME;
+    currentIndex = -1;
+    shuffledQuestions = [];
+    scoreEl.textContent = "0";
+    timeLeftEl.textContent = TOTAL_TIME.toString();
+    qNumEl.textContent = "0";
+    questionBox.textContent = "";
+    statusMsg.textContent = "";
+    wrongBox.innerHTML = "";
+  }
+
+  // --- Helpers ---
+  function shuffle(arr){
+    for(let i = arr.length -1; i > 0; i--){
+      const j = Math.floor(Math.random() * (i+1));
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+    return arr;
+  }
+
+  function normalizeText(t){
+    return (t || "")
+      .replace(/[，。！？、,.!?\s]/g, "")
+      .trim();
+  }
+
+  function recognizeOnce(){
+    return new Promise((resolve, reject) => {
+      if(!recognition) return reject(new Error("SpeechRecognition not supported"));
+      recognition.onresult = (event) => {
+        const transcript = Array.from(event.results)
+          .map(res => res[0].transcript)
+          .join('');
+        resolve(transcript);
+      };
+      recognition.onend = () => {
+        recognizing = false;
+      };
+      recognition.onerror = (e) => {
+        reject(e);
+      };
+      try {
+        recognition.start();
+      } catch (err){
+        // 某些浏览器当 recognition 已在运行时再次 start 会抛错
+        reject(err);
+      }
+    });
+  }
+
+  // 用于第一次静默触发权限
+  function recognizeOnceSilently(){
+    return new Promise((resolve, reject) => {
+      if(!recognition) return reject(new Error("SpeechRecognition not supported"));
+      let timeout = setTimeout(() => {
+        try { recognition.stop(); } catch(e){}
+        resolve(""); // 超时也算完成
+      }, 2000);
+
+      recognition.onresult = () => {};
+      recognition.onerror = () => {
+        clearTimeout(timeout);
+        resolve(""); // 失败也继续
+      };
+      recognition.onend = () => {
+        clearTimeout(timeout);
+        resolve("");
+      };
+
+      try { recognition.start(); } catch(e){ resolve(""); }
+    });
+  }
+
+  function saveScore(name, score, timeLeft){
+    const now = new Date();
+    const entry = {
+      name,
+      score,
+      timeLeft,
+      finishedAt: now.toISOString(),
+      finishedAtDisplay: now.toLocaleString(),
+      gameId
+    };
+    const list = loadScores();
+    list.push(entry);
+    const sorted = sortScores(list);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(sorted));
+  }
+
+  function loadScores(){
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if(!raw) return [];
+      return JSON.parse(raw) || [];
+    } catch {
+      return [];
+    }
+  }
+
+  function sortScores(list){
+    // 分数降序 -> 剩余时间降序 -> 完成时间最新在前
+    return list.sort((a, b) => {
+      if(b.score !== a.score) return b.score - a.score;
+      if(b.timeLeft !== a.timeLeft) return b.timeLeft - a.timeLeft;
+      return new Date(b.finishedAt) - new Date(a.finishedAt);
+    });
+  }
+
+  function renderLeaderboard(){
+    const data = loadScores();
+    const top10 = data.slice(0, 10);
+    leaderboardTableBody.innerHTML = top10.map((row, idx) => `
+      <tr>
+        <td>${idx + 1}</td>
+        <td>${escapeHtml(row.name)}</td>
+        <td>${row.score}</td>
+        <td>${row.timeLeft}</td>
+        <td>${escapeHtml(row.finishedAtDisplay || row.finishedAt)}</td>
+        <td>${row.gameId}</td>
+      </tr>
+    `).join('') || `<tr><td colspan="6">暂无记录</td></tr>`;
+  }
+
+  function escapeHtml(str){
+    return (str || "").replace(/[&<>"']/g, s => ({
+      '&': '&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'
+    }[s]));
+  }
+
+  // 初始渲染排行榜
+  renderLeaderboard();
+})();
+</script>
+</body>
+</html>
+
